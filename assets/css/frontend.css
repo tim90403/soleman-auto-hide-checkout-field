@@ -1,0 +1,8 @@
+.sahcf-hidden {
+	display: none !important;
+}
+
+.form-row.sahcf-optionalized .required,
+.form-row.sahcf-optionalized abbr.required {
+	display: none;
+}

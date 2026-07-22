@@ -1,0 +1,17 @@
+# Dependencies
+參考/
+node_modules/
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Env
+.env
+.env.*
