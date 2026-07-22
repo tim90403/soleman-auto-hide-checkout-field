@@ -5,7 +5,7 @@ Tags: woocommerce, checkout, payment, fields, hide
 Requires at least: 5.8
 Tested up to: 6.8
 Requires PHP: 7.4
-Stable tag: 1.0.0
+Stable tag: 1.0.2
 License: GPLv2 or later
 License URI: https://www.gnu.org/licenses/gpl-2.0.html
 
@@ -41,6 +41,13 @@ Soleman Auto Hide Checkout Field 可讓你在 WooCommerce 設定中，針對每�
 前端會顯示全部欄位。
 
 == Changelog ==
+
+= 1.0.2 =
+* 完全移除 country locale / default address filters，避免與物件快取或 THWCFD 連鎖錯誤
+* Block Checkout 改以安全方式處理隱藏必填欄位
+
+= 1.0.1 =
+* 修正儲存設定後，因 locale / 結帳欄位互相呼叫造成的無限遞迴，導致前台致命錯誤
 
 = 1.0.0 =
 * 初始版本

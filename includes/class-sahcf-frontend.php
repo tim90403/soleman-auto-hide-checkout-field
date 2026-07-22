@@ -11,6 +11,9 @@ if ( ! defined( 'ABSPATH' ) ) {
 
 /**
  * Class SAHCF_Frontend
+ *
+ * Intentionally does NOT hook country-locale / default address filters.
+ * Those hooks can recurse with THWCFD/WooCommerce field builders and take down the site.
  */
 class SAHCF_Frontend {
 
@@ -37,11 +40,7 @@ class SAHCF_Frontend {
 		add_filter( 'rest_pre_dispatch', array( $this, 'capture_rest_payment_method' ), 10, 3 );
 		add_action( 'woocommerce_store_api_checkout_update_order_from_request', array( $this, 'on_store_api_update_order' ), 5, 2 );
 
-		// Block: make hidden address fields optional / hidden via locale.
-		add_filter( 'woocommerce_get_country_locale_default', array( $this, 'filter_locale_default' ), 100 );
-		add_filter( 'woocommerce_default_address_fields', array( $this, 'filter_default_address_fields' ), 100 );
-
-		// Block additional field validation.
+		// Block additional field validation softener.
 		add_action( 'woocommerce_blocks_validate_location_address_fields', array( $this, 'filter_block_location_errors' ), 10, 3 );
 		add_action( 'woocommerce_blocks_validate_location_contact_fields', array( $this, 'filter_block_location_errors' ), 10, 3 );
 		add_action( 'woocommerce_blocks_validate_location_order_fields', array( $this, 'filter_block_location_errors' ), 10, 3 );
@@ -84,7 +83,7 @@ class SAHCF_Frontend {
 	}
 
 	/**
-	 * Classic: unset required / optionally disable validation for hidden fields.
+	 * Classic: unset required for hidden fields.
 	 *
 	 * @param array $fields Checkout fields.
 	 * @return array
@@ -93,7 +92,7 @@ class SAHCF_Frontend {
 		$payment = SAHCF_Fields::get_current_payment_method();
 		$hidden  = SAHCF_Fields::get_hidden_fields( $payment );
 
-		if ( empty( $hidden ) ) {
+		if ( empty( $hidden ) || ! is_array( $fields ) ) {
 			return $fields;
 		}
 
@@ -126,7 +125,7 @@ class SAHCF_Frontend {
 
 		foreach ( $hidden as $key ) {
 			if ( isset( $data[ $key ] ) ) {
-				$data[ $key ] = '';
+				$data[ $key ] = is_array( $data[ $key ] ) ? array() : '';
 			}
 		}
 
@@ -136,21 +135,25 @@ class SAHCF_Frontend {
 	/**
 	 * Capture payment method from Store API JSON body.
 	 *
-	 * @param mixed            $result  Response.
-	 * @param WP_REST_Server   $server  Server.
-	 * @param WP_REST_Request  $request Request.
+	 * @param mixed           $result  Response.
+	 * @param WP_REST_Server  $server  Server.
+	 * @param WP_REST_Request $request Request.
 	 * @return mixed
 	 */
 	public function capture_rest_payment_method( $result, $server, $request ) {
 		unset( $server );
 
-		$route = $request instanceof WP_REST_Request ? $request->get_route() : '';
+		if ( ! ( $request instanceof WP_REST_Request ) ) {
+			return $result;
+		}
+
+		$route = $request->get_route();
 		if ( ! is_string( $route ) || false === strpos( $route, '/wc/store' ) ) {
 			return $result;
 		}
 
 		$payment = $request->get_param( 'payment_method' );
-		if ( empty( $payment ) && $request instanceof WP_REST_Request ) {
+		if ( empty( $payment ) ) {
 			$json = $request->get_json_params();
 			if ( is_array( $json ) && ! empty( $json['payment_method'] ) ) {
 				$payment = $json['payment_method'];
@@ -162,7 +165,6 @@ class SAHCF_Frontend {
 			if ( function_exists( 'WC' ) && WC()->session ) {
 				WC()->session->set( 'chosen_payment_method', $this->rest_payment_method );
 			}
-			$this->reset_country_locale_cache();
 		}
 
 		return $result;
@@ -171,22 +173,86 @@ class SAHCF_Frontend {
 	/**
 	 * Store API order update hook.
 	 *
+	 * Fills placeholders for hidden required address fields so Block validation
+	 * does not fail — without touching country locale (avoids recursion).
+	 *
 	 * @param WC_Order        $order   Order.
 	 * @param WP_REST_Request $request Request.
 	 */
 	public function on_store_api_update_order( $order, $request ) {
+		if ( ! ( $order instanceof WC_Order ) ) {
+			return;
+		}
+
 		$payment = $request->get_param( 'payment_method' );
 		if ( ! empty( $payment ) ) {
 			$this->rest_payment_method = sanitize_text_field( (string) $payment );
-			$this->reset_country_locale_cache();
 		}
 
-		// Store API always requires a billing email; provide a placeholder when the field is intentionally hidden.
 		$hidden = SAHCF_Fields::get_hidden_fields( $this->resolve_payment_method() );
-		if ( in_array( 'billing_email', $hidden, true ) && $order instanceof WC_Order && ! $order->get_billing_email() ) {
-			$host = wp_parse_url( home_url(), PHP_URL_HOST );
-			$host = $host ? $host : 'localhost';
-			$order->set_billing_email( 'hidden-checkout@' . $host );
+		if ( empty( $hidden ) ) {
+			return;
+		}
+
+		$host = wp_parse_url( home_url(), PHP_URL_HOST );
+		$host = $host ? $host : 'localhost';
+
+		$setters = array(
+			'billing_first_name'  => 'set_billing_first_name',
+			'billing_last_name'   => 'set_billing_last_name',
+			'billing_company'     => 'set_billing_company',
+			'billing_address_1'   => 'set_billing_address_1',
+			'billing_address_2'   => 'set_billing_address_2',
+			'billing_city'        => 'set_billing_city',
+			'billing_state'       => 'set_billing_state',
+			'billing_postcode'    => 'set_billing_postcode',
+			'billing_country'     => 'set_billing_country',
+			'billing_phone'       => 'set_billing_phone',
+			'billing_email'       => 'set_billing_email',
+			'shipping_first_name' => 'set_shipping_first_name',
+			'shipping_last_name'  => 'set_shipping_last_name',
+			'shipping_company'    => 'set_shipping_company',
+			'shipping_address_1'  => 'set_shipping_address_1',
+			'shipping_address_2'  => 'set_shipping_address_2',
+			'shipping_city'       => 'set_shipping_city',
+			'shipping_state'      => 'set_shipping_state',
+			'shipping_postcode'   => 'set_shipping_postcode',
+			'shipping_country'    => 'set_shipping_country',
+			'shipping_phone'      => 'set_shipping_phone',
+		);
+
+		foreach ( $hidden as $field_key ) {
+			if ( ! isset( $setters[ $field_key ] ) ) {
+				continue;
+			}
+
+			$setter = $setters[ $field_key ];
+			$getter = str_replace( 'set_', 'get_', $setter );
+
+			if ( ! method_exists( $order, $getter ) || ! method_exists( $order, $setter ) ) {
+				continue;
+			}
+
+			$current = $order->{$getter}();
+			if ( '' !== (string) $current ) {
+				continue;
+			}
+
+			if ( 'billing_email' === $field_key ) {
+				$order->{$setter}( 'hidden-checkout@' . $host );
+				continue;
+			}
+
+			if ( 'billing_country' === $field_key || 'shipping_country' === $field_key ) {
+				$base = function_exists( 'WC' ) && WC()->countries ? WC()->countries->get_base_country() : '';
+				if ( $base ) {
+					$order->{$setter}( $base );
+				}
+				continue;
+			}
+
+			// Non-empty placeholder so Store API required checks pass for intentionally hidden fields.
+			$order->{$setter}( '-' );
 		}
 	}
 
@@ -203,84 +269,7 @@ class SAHCF_Frontend {
 	}
 
 	/**
-	 * Reset WC_Countries locale cache so filters re-apply with current payment method.
-	 */
-	private function reset_country_locale_cache() {
-		if ( ! function_exists( 'WC' ) || ! WC()->countries ) {
-			return;
-		}
-
-		try {
-			$ref  = new ReflectionClass( WC()->countries );
-			$prop = $ref->getProperty( 'locale' );
-			$prop->setAccessible( true );
-			$prop->setValue( WC()->countries, null );
-		} catch ( Exception $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
-			// Silently ignore if reflection fails.
-		}
-	}
-
-	/**
-	 * Filter default locale address fields for Block validation.
-	 *
-	 * @param array $fields Fields.
-	 * @return array
-	 */
-	public function filter_locale_default( $fields ) {
-		return $this->apply_hidden_to_address_fields( $fields );
-	}
-
-	/**
-	 * Filter default address fields.
-	 *
-	 * @param array $fields Fields.
-	 * @return array
-	 */
-	public function filter_default_address_fields( $fields ) {
-		return $this->apply_hidden_to_address_fields( $fields );
-	}
-
-	/**
-	 * Mark address fields hidden/optional based on classic field mapping.
-	 *
-	 * @param array $fields Address fields (unprefixed keys).
-	 * @return array
-	 */
-	private function apply_hidden_to_address_fields( $fields ) {
-		$payment = $this->resolve_payment_method();
-		$hidden  = SAHCF_Fields::get_hidden_fields( $payment );
-
-		if ( empty( $hidden ) || ! is_array( $fields ) ) {
-			return $fields;
-		}
-
-		foreach ( $hidden as $classic_key ) {
-			$mapped = SAHCF_Fields::map_classic_to_block( $classic_key );
-			if ( ! $mapped ) {
-				continue;
-			}
-
-			// Address locale only covers core address keys (not billing_/shipping_ prefix).
-			if ( ! in_array( $mapped['group'], array( 'billing', 'shipping' ), true ) ) {
-				continue;
-			}
-
-			$name = $mapped['name'];
-			if ( ! isset( $fields[ $name ] ) ) {
-				continue;
-			}
-
-			$fields[ $name ]['required'] = false;
-			$fields[ $name ]['hidden']   = true;
-		}
-
-		return $fields;
-	}
-
-	/**
 	 * Soften block location validation for hidden additional fields.
-	 *
-	 * Note: core address required checks use locale; this catches additional field errors when possible.
 	 *
 	 * @param WP_Error $errors Errors.
 	 * @param array    $fields Fields.

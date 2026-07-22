@@ -3,7 +3,7 @@
  * Plugin Name:       Soleman Auto Hide Checkout Field
  * Plugin URI:        https://soleman.tw
  * Description:       依 WooCommerce 付款方式動態顯示／隱藏結帳欄位（支援 Classic 與 Block Checkout）。
- * Version:           1.0.0
+ * Version:           1.0.2
  * Requires at least: 5.8
  * Requires PHP:      7.4
  * Author:            Soleman
@@ -20,7 +20,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'SAHCF_VERSION', '1.0.0' );
+define( 'SAHCF_VERSION', '1.0.2' );
 define( 'SAHCF_FILE', __FILE__ );
 define( 'SAHCF_PATH', plugin_dir_path( __FILE__ ) );
 define( 'SAHCF_URL', plugin_dir_url( __FILE__ ) );

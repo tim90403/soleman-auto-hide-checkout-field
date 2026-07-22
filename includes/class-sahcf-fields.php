@@ -14,7 +14,27 @@ if ( ! defined( 'ABSPATH' ) ) {
  */
 class SAHCF_Fields {
 
-	const OPTION_KEY = 'sahcf_visibility_map';
+	const OPTION_KEY         = 'sahcf_visibility_map';
+	const OPTION_ALL_FIELDS  = 'sahcf_all_field_keys';
+
+	/**
+	 * Re-entrancy guard while collecting fields.
+	 *
+	 * @var bool
+	 */
+	private static $collecting_fields = false;
+
+	/**
+	 * Request-level caches.
+	 *
+	 * @var array|null
+	 */
+	private static $visibility_map_cache = null;
+
+	/**
+	 * @var string[]|null
+	 */
+	private static $all_field_keys_cache = null;
 
 	/**
 	 * Get enabled payment gateways.
@@ -57,57 +77,92 @@ class SAHCF_Fields {
 	/**
 	 * Get checkout fields grouped by section.
 	 *
+	 * IMPORTANT: Must not be called from within country-locale / address-field filters.
+	 *
 	 * @return array<string,array<string,array>>
 	 */
 	public static function get_checkout_fields_grouped() {
+		if ( self::$collecting_fields ) {
+			return array(
+				'billing'    => array(),
+				'shipping'   => array(),
+				'additional' => array(),
+			);
+		}
+
+		self::$collecting_fields = true;
+
 		$sections = array(
 			'billing'    => array(),
 			'shipping'   => array(),
 			'additional' => array(),
 		);
 
-		if ( self::is_thwcfd_available() ) {
-			foreach ( array_keys( $sections ) as $section ) {
-				$fields = THWCFD_Utils::get_fields( $section );
-				foreach ( $fields as $key => $field ) {
-					if ( is_array( $field ) && isset( $field['enabled'] ) && false === $field['enabled'] ) {
+		try {
+			if ( self::is_thwcfd_available() ) {
+				foreach ( array_keys( $sections ) as $section ) {
+					$fields = THWCFD_Utils::get_fields( $section );
+					foreach ( $fields as $key => $field ) {
+						if ( is_array( $field ) && isset( $field['enabled'] ) && false === $field['enabled'] ) {
+							continue;
+						}
+						$sections[ $section ][ $key ] = self::normalize_field( $key, $field, $section );
+					}
+				}
+			} elseif ( function_exists( 'WC' ) && WC()->checkout() ) {
+				$all = WC()->checkout()->get_checkout_fields();
+				foreach ( array( 'billing', 'shipping', 'order' ) as $section ) {
+					$target = ( 'order' === $section ) ? 'additional' : $section;
+					if ( empty( $all[ $section ] ) || ! is_array( $all[ $section ] ) ) {
 						continue;
 					}
-					$sections[ $section ][ $key ] = self::normalize_field( $key, $field, $section );
+					foreach ( $all[ $section ] as $key => $field ) {
+						$sections[ $target ][ $key ] = self::normalize_field( $key, $field, $target );
+					}
 				}
 			}
-
-			return $sections;
-		}
-
-		if ( function_exists( 'WC' ) && WC()->checkout() ) {
-			$all = WC()->checkout()->get_checkout_fields();
-			foreach ( array( 'billing', 'shipping', 'order' ) as $section ) {
-				$target = ( 'order' === $section ) ? 'additional' : $section;
-				if ( empty( $all[ $section ] ) || ! is_array( $all[ $section ] ) ) {
-					continue;
-				}
-				foreach ( $all[ $section ] as $key => $field ) {
-					$sections[ $target ][ $key ] = self::normalize_field( $key, $field, $target );
-				}
-			}
+		} finally {
+			self::$collecting_fields = false;
 		}
 
 		return $sections;
 	}
 
 	/**
-	 * Flatten all field keys.
+	 * Collect field keys safely (admin / save time).
 	 *
 	 * @return string[]
 	 */
-	public static function get_all_field_keys() {
-		$keys     = array();
-		$grouped  = self::get_checkout_fields_grouped();
+	public static function collect_all_field_keys() {
+		$keys    = array();
+		$grouped = self::get_checkout_fields_grouped();
 		foreach ( $grouped as $fields ) {
 			$keys = array_merge( $keys, array_keys( $fields ) );
 		}
 		return array_values( array_unique( $keys ) );
+	}
+
+	/**
+	 * Flatten all field keys.
+	 *
+	 * Prefers the snapshot saved with settings to avoid recursive locale lookups.
+	 *
+	 * @return string[]
+	 */
+	public static function get_all_field_keys() {
+		if ( null !== self::$all_field_keys_cache ) {
+			return self::$all_field_keys_cache;
+		}
+
+		$saved = get_option( self::OPTION_ALL_FIELDS, array() );
+		if ( is_array( $saved ) && ! empty( $saved ) ) {
+			self::$all_field_keys_cache = array_values( array_map( 'strval', $saved ) );
+			return self::$all_field_keys_cache;
+		}
+
+		// No snapshot yet (settings never saved) — safe to collect.
+		self::$all_field_keys_cache = self::collect_all_field_keys();
+		return self::$all_field_keys_cache;
 	}
 
 	/**
@@ -158,17 +213,28 @@ class SAHCF_Fields {
 	 * @return array<string,string[]> payment_method => list of visible field keys
 	 */
 	public static function get_visibility_map() {
+		if ( null !== self::$visibility_map_cache ) {
+			return self::$visibility_map_cache;
+		}
+
 		$map = get_option( self::OPTION_KEY, array() );
-		return is_array( $map ) ? $map : array();
+		self::$visibility_map_cache = is_array( $map ) ? $map : array();
+		return self::$visibility_map_cache;
 	}
 
 	/**
-	 * Save visibility map.
+	 * Save visibility map and field-key snapshot.
 	 *
 	 * @param array $map Map.
 	 * @return bool
 	 */
 	public static function save_visibility_map( $map ) {
+		self::$visibility_map_cache = null;
+		self::$all_field_keys_cache = null;
+
+		$keys = self::collect_all_field_keys();
+		update_option( self::OPTION_ALL_FIELDS, $keys, false );
+
 		return update_option( self::OPTION_KEY, $map, false );
 	}
 
@@ -202,6 +268,9 @@ class SAHCF_Fields {
 	/**
 	 * Get fields that should be hidden for a payment method.
 	 *
+	 * Uses the saved field-key snapshot only — never rebuilds checkout fields
+	 * from WC/THWCFD during locale filters (avoids infinite recursion).
+	 *
 	 * @param string $payment_method Payment method id.
 	 * @return string[]
 	 */
@@ -212,6 +281,10 @@ class SAHCF_Fields {
 		}
 
 		$all = self::get_all_field_keys();
+		if ( empty( $all ) ) {
+			return array();
+		}
+
 		return array_values( array_diff( $all, $visible ) );
 	}
 
